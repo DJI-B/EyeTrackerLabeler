@@ -12,6 +12,9 @@ except ImportError:
     ONNXRUNTIME_AVAILABLE = False
     print("Warning: ONNX Runtime not available. Smart detection will be disabled.")
 
+# 定义输出大小常量（根据C++代码中的EYE_OUTPUT_SIZE）
+EYE_OUTPUT_SIZE = 7 * 2  # 7个点，每个点2个坐标
+
 class Object:
     """检测对象"""
     def __init__(self):
@@ -20,13 +23,17 @@ class Object:
         self.rect = (0, 0, 0, 0)  # x, y, w, h
 
 class SmartAdd:
-    """智能标注类"""
+    """智能标注类 - 基于C++版本的眼部推理实现"""
     
     def __init__(self):
         self.num_points = 7  # 固定为7个点
         self.model_path = ""
-        self.input_width = 640
-        self.input_height = 640
+        
+        # 根据C++代码设置输入尺寸
+        self.input_width = 112
+        self.input_height = 112
+        self.input_channels = 1  # 灰度图
+        
         self.conf_thresh = 0.6
         self.nms_thresh = 0.3
         
@@ -35,6 +42,14 @@ class SmartAdd:
             self.session = None
             self.input_name = None
             self.output_names = None
+            self.input_shapes = []
+            self.output_shapes = []
+            self.memory_info = None
+            
+            # 预分配的缓冲区
+            self.input_data = None
+            self.gray_image = None
+            self.processed_image = None
         else:
             self.session = None
     
@@ -43,7 +58,7 @@ class SmartAdd:
         self.num_points = 7  # 始终为7个点
     
     def set_model(self, model_path: str) -> bool:
-        """设置模型路径"""
+        """设置模型路径 - 基于C++的load_model实现"""
         if not ONNXRUNTIME_AVAILABLE:
             print("ONNX Runtime not available")
             return False
@@ -51,12 +66,26 @@ class SmartAdd:
         try:
             self.model_path = model_path
             
-            # 创建ONNX Runtime会话
+            # 创建环境
             providers = ['CPUExecutionProvider']
-            if ort.get_device() == 'GPU':
-                providers.insert(0, 'CUDAExecutionProvider')
             
-            self.session = ort.InferenceSession(self.model_path, providers=providers)
+            # 配置会话选项 - 与C++版本保持一致
+            session_options = ort.SessionOptions()
+            session_options.intra_op_num_threads = 2
+            session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            session_options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            
+            # Python版本的内存选项
+            session_options.enable_cpu_mem_arena = True
+            session_options.enable_mem_pattern = False
+            
+            # 创建会话
+            self.session = ort.InferenceSession(
+                self.model_path, 
+                sess_options=session_options,
+                providers=providers
+            )
             
             # 获取输入输出信息
             self.input_name = self.session.get_inputs()[0].name
@@ -64,73 +93,104 @@ class SmartAdd:
             
             # 获取输入形状
             input_shape = self.session.get_inputs()[0].shape
-            if len(input_shape) == 4:  # NCHW或NHWC
-                if input_shape[1] == 3:  # NCHW
-                    self.input_height = input_shape[2]
-                    self.input_width = input_shape[3]
-                else:  # NHWC
-                    self.input_height = input_shape[1]
-                    self.input_width = input_shape[2]
+            self.input_shapes = [input_shape]
             
-            print(f"Model loaded successfully. Input shape: {input_shape}")
+            # 获取输出形状
+            self.output_shapes = [output.shape for output in self.session.get_outputs()]
+            
+            # 预分配缓冲区
+            self.allocate_buffers()
+            
+            print(f"眼睛模型加载完成")
+            print(f"Input shape: {input_shape}")
+            print(f"Output shapes: {self.output_shapes}")
+            
             return True
+            
         except Exception as e:
             print(f"Error loading model: {e}")
             return False
     
-    def preprocess_image(self, img: np.ndarray) -> np.ndarray:
-        """预处理图像"""
-        # 调整大小
-        resized = cv2.resize(img, (self.input_width, self.input_height))
+    def allocate_buffers(self):
+        """预分配缓冲区"""
+        if not ONNXRUNTIME_AVAILABLE or not self.session:
+            return
         
-        # 转换为浮点并归一化
-        resized = resized.astype(np.float32) / 255.0
+        # 分配输入数据缓冲区
+        self.input_data = np.zeros(
+            (1, self.input_channels, self.input_height, self.input_width), 
+            dtype=np.float32
+        )
         
-        # 转换为CHW格式
-        resized = np.transpose(resized, (2, 0, 1))
+        # 预分配图像处理缓冲区
+        self.gray_image = np.zeros((self.input_height, self.input_width), dtype=np.uint8)
+        self.processed_image = np.zeros((self.input_height, self.input_width), dtype=np.float32)
+    
+    def preprocess_image_from_cv2(self, img: np.ndarray) -> np.ndarray:
+        """预处理图像 - 基于C++的preprocess实现"""
+        # 转换为灰度图（如果需要）
+        if len(img.shape) == 3 and img.shape[2] == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        elif len(img.shape) == 3 and img.shape[2] == 1:
+            gray = img[:, :, 0]
+        else:
+            gray = img
         
-        # 添加batch维度
-        resized = np.expand_dims(resized, axis=0)
+        # 调整大小 - 使用INTER_NEAREST与C++保持一致
+        resized = cv2.resize(gray, (self.input_width, self.input_height), 
+                           interpolation=cv2.INTER_NEAREST)
         
-        return resized
+        # 归一化处理 - 转换为float32并除以255
+        normalized = resized.astype(np.float32) / 255.0
+        
+        # 添加通道维度和批次维度 (H,W) -> (1,1,H,W)
+        if len(normalized.shape) == 2:
+            normalized = normalized[np.newaxis, np.newaxis, :, :]
+        
+        return normalized
+    
+    def run_inference(self, input_data: np.ndarray) -> Optional[np.ndarray]:
+        """运行推理 - 基于C++的run_model实现"""
+        if not self.session:
+            return None
+        
+        try:
+            # 运行推理
+            outputs = self.session.run(
+                self.output_names, 
+                {self.input_name: input_data}
+            )
+            
+            return outputs[0]  # 返回第一个输出
+            
+        except Exception as e:
+            print(f"推理错误: {e}")
+            return None
     
     def postprocess(self, output: np.ndarray, original_shape: Tuple[int, int]) -> List[Object]:
-        """后处理输出"""
+        """后处理输出 - 适配眼部7点检测"""
         objects = []
         
-        # 根据ONNX模型输出格式调整
-        if isinstance(output, list):
-            output = output[0]
+        # 确保输出形状正确
+        output = output.flatten()
         
-        if output.ndim == 3:
-            output = output[0]  # 移除batch维度
-        
-        # 假设输出格式为 [num_detections, conf + 7*2_points]
-        # 即每个检测包含：置信度 + 7个点的x,y坐标
-        expected_size = 1 + self.num_points * 2  # 1个置信度 + 7个点的坐标
-        
-        for detection in output:
-            if len(detection) < expected_size:
-                continue
-            
-            conf = detection[0]
-            if conf < self.conf_thresh:
-                continue
-            
+        # 如果输出正好是14个值（7个点的x,y坐标）
+        if len(output) >= EYE_OUTPUT_SIZE:
             obj = Object()
-            obj.conf = conf
+            obj.conf = 1.0  # 如果模型不输出置信度，设置为1.0
             
-            # 提取点坐标
+            # 提取7个点的坐标
             scale_x = original_shape[1] / self.input_width
             scale_y = original_shape[0] / self.input_height
             
             for i in range(self.num_points):
-                x_idx = 1 + i * 2
-                y_idx = 1 + i * 2 + 1
+                x_idx = i * 2
+                y_idx = i * 2 + 1
                 
-                if y_idx < len(detection):
-                    x = detection[x_idx] * scale_x
-                    y = detection[y_idx] * scale_y
+                if y_idx < len(output):
+                    # 假设输出是归一化坐标，需要反归一化
+                    x = output[x_idx] * original_shape[1]
+                    y = output[y_idx] * original_shape[0]
                     obj.points.append((x, y))
             
             if len(obj.points) == self.num_points:
@@ -138,45 +198,8 @@ class SmartAdd:
         
         return objects
     
-    def non_max_suppression(self, objects: List[Object]) -> List[Object]:
-        """非极大值抑制"""
-        if not objects:
-            return objects
-        
-        # 简单的NMS实现
-        objects.sort(key=lambda x: x.conf, reverse=True)
-        
-        keep = []
-        for i, obj in enumerate(objects):
-            should_keep = True
-            for kept_obj in keep:
-                # 计算IoU或距离，这里简化处理
-                if self.calculate_overlap(obj, kept_obj) > self.nms_thresh:
-                    should_keep = False
-                    break
-            
-            if should_keep:
-                keep.append(obj)
-        
-        return keep
-    
-    def calculate_overlap(self, obj1: Object, obj2: Object) -> float:
-        """计算两个对象的重叠度"""
-        if not obj1.points or not obj2.points:
-            return 0.0
-        
-        # 简化计算：计算第一个点的距离
-        p1 = obj1.points[0]
-        p2 = obj2.points[0]
-        
-        distance = ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)**0.5
-        
-        # 归一化距离作为重叠度
-        max_distance = 100  # 阈值
-        return max(0, 1 - distance / max_distance)
-    
     def detect(self, img_path: str, target: List[OneLabel]) -> bool:
-        """检测函数"""
+        """检测函数 - 基于C++的inference流程"""
         if not ONNXRUNTIME_AVAILABLE or not self.session:
             print("Model not loaded or ONNX Runtime not available")
             return False
@@ -191,28 +214,29 @@ class SmartAdd:
             original_shape = img.shape[:2]
             
             # 预处理
-            input_data = self.preprocess_image(img)
+            input_data = self.preprocess_image_from_cv2(img)
             
-            # 推理
-            outputs = self.session.run(self.output_names, {self.input_name: input_data})
+            # 运行推理
+            output = self.run_inference(input_data)
+            if output is None:
+                return False
             
             # 后处理
-            objects = self.postprocess(outputs, original_shape)
-            
-            # NMS
-            objects = self.non_max_suppression(objects)
+            objects = self.postprocess(output, original_shape)
             
             # 转换为OneLabel格式
             target.clear()
             for obj in objects:
-                if obj.conf >= 0.5:  # 最终置信度阈值
-                    label = OneLabel(self.num_points)
-                    for point in obj.points:
-                        label.set_point(QPointF(point[0], point[1]))
+                label = OneLabel(self.num_points)
+                for point in obj.points:
+                    label.set_point(QPointF(point[0], point[1]))
+                if label.success():  # 确保7个点都设置成功
                     target.append(label)
             
-            return True
-        
+            return len(target) > 0
+            
         except Exception as e:
             print(f"Detection error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
