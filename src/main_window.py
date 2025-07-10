@@ -12,8 +12,8 @@ from .startup_dialog import StartupDialog
 
 class MainWindow(QMainWindow):
     """主窗口类"""
-    
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None):
+        """初始化主窗口"""
         super().__init__(parent)
         self.focus_index = -1
         self.current_folder = ""
@@ -59,6 +59,9 @@ class MainWindow(QMainWindow):
             self.show()
             print("窗口显示完成")
             
+            # 使用QTimer延迟加载第一张图片
+            QTimer.singleShot(100, self.load_first_image)
+            
             self.initialization_success = True
             print("主窗口初始化成功")
             
@@ -67,7 +70,18 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             self.initialization_success = False
-    
+
+    def load_first_image(self):
+        """延迟加载第一张图片"""
+        if self.has_images and self.file_list.count() > 0:
+            first_item = self.file_list.item(0)
+            if first_item:
+                print("正在加载第一张图片...")
+                self.image_label.set_current_file(first_item.text())
+                self.refresh_label_list()
+                # 强制更新显示
+                self.image_label.update()
+
     def show_startup_dialog(self) -> bool:
         """显示启动对话框"""
         dialog = StartupDialog(self)
@@ -80,10 +94,10 @@ class MainWindow(QMainWindow):
             
             # 设置自动保存
             self.auto_save_enabled = config['auto_save']
-            
+            if hasattr(self, 'image_label'):
+                self.image_label.auto_save = self.auto_save_enabled
             return True
         return False
-    
     def load_images_from_folder(self):
         """从文件夹加载图片"""
         if not self.current_folder:
@@ -126,6 +140,9 @@ class MainWindow(QMainWindow):
             # 如果有模型文件，加载它
             if self.model_file:
                 self.image_label.set_model_file(self.model_file)
+            
+            # 不在这里加载第一张图片，改为在延迟函数中加载
+
     
     def update_ui_state(self):
         """更新UI状态"""
@@ -201,7 +218,8 @@ class MainWindow(QMainWindow):
         self.image_label = DrawOnPic()
         self.image_label.setMinimumSize(1000, 700)
         splitter.addWidget(self.image_label)
-        
+        self.image_label.auto_save = getattr(self, 'auto_save_enabled', True)
+    
         # 右侧信息面板
         right_panel = self.create_right_panel()
         splitter.addWidget(right_panel)
