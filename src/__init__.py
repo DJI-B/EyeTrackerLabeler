@@ -1,7 +1,7 @@
 # src/__init__.py
 """
-Helios Label Tool - Python版本
-一个功能完整的图像标注工具
+PaperTrackerEyeLabeler - Python版本
+专业的眼部追踪标注工具
 
 主要组件:
 - MainWindow: 主界面
@@ -10,11 +10,12 @@ Helios Label Tool - Python版本
 - OneLabel: 单个标签管理
 - Painter: 图像绘制器
 - SmartAdd: AI智能检测
+- StartupDialog: 启动配置对话框
 """
 
-__version__ = "1.0.0"
-__author__ = "Helios Label Tool Team"
-__email__ = "support@helios-label.com"
+__version__ = "2.0.0"
+__author__ = "PaperTrackerEyeLabeler Team"
+__email__ = "support@papertracker-eye.com"
 
 # 导入主要类，方便外部使用
 from .main_window import MainWindow
@@ -24,6 +25,7 @@ from .txt_manager import AllLabel
 from .qt_painter import Painter
 from .model import SmartAdd
 from .index_list import IndexQListWidgetItem
+from .startup_dialog import StartupDialog
 
 # 定义公共API
 __all__ = [
@@ -34,24 +36,28 @@ __all__ = [
     'Painter',
     'SmartAdd',
     'IndexQListWidgetItem',
+    'StartupDialog',
     # 常量
     'MOVE',
     'ADD',
-    'ARMOR',
-    'ENERGY', 
-    'NORM',
 ]
 
 # 导入常量
-from .draw_on_pic import MOVE, ADD, ARMOR, ENERGY, NORM
+from .draw_on_pic import MOVE, ADD
 
-# 可选：添加包级别的配置
+# 包级别的配置
 DEFAULT_CONFIG = {
-    'default_num_points': 4,
+    'default_num_points': 7,
     'default_conf_thresh': 0.6,
     'default_nms_thresh': 0.3,
-    'supported_image_formats': ['.jpg', '.jpeg', '.png', '.bmp', '.tiff'],
+    'supported_image_formats': ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'],
     'supported_model_formats': ['.onnx'],
+    'annotation_type': 'hexagon_with_free_point',
+    'hexagon_points': 6,
+    'free_points': 1,
+    'total_points': 7,
+    'app_name': 'PaperTrackerEyeLabeler',
+    'app_description': 'Professional eye tracking annotation tool',
 }
 
 def get_version():
@@ -82,12 +88,12 @@ def _check_dependencies():
     except ImportError:
         missing_deps.append('numpy')
     
-    # OpenVINO是可选的
+    # ONNX Runtime是可选的
     try:
-        import openvino
+        import onnxruntime
     except ImportError:
         import warnings
-        warnings.warn("OpenVINO not found. Smart detection will be disabled.", 
+        warnings.warn("ONNX Runtime not found. Smart detection will be disabled.", 
                      UserWarning)
     
     if missing_deps:
@@ -112,4 +118,4 @@ def setup_logging(level=logging.INFO):
 
 # 创建包级别的日志器
 logger = logging.getLogger(__name__)
-logger.info(f"Helios Label Tool v{__version__} initialized")
+logger.info(f"PaperTrackerEyeLabeler v{__version__} initialized - Professional eye tracking annotation tool")

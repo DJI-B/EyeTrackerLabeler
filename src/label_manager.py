@@ -4,11 +4,9 @@ from PyQt5.QtCore import QPointF
 class OneLabel:
     """单个标签管理类"""
     
-    def __init__(self, num_points: int = 0):
+    def __init__(self, num_points: int = 7):
         self.num_points = num_points
         self.label_points: List[QPointF] = []
-        self.label_class = 0
-        self.has_class = False
         self.has_points = False
     
     def set_point(self, point: QPointF) -> bool:
@@ -26,17 +24,6 @@ class OneLabel:
         self.num_points = len(self.label_points)
         self.has_points = True
     
-    def set_class(self, cls: int) -> bool:
-        """设置类别"""
-        if not self.has_points:
-            return False
-        self.label_class = cls
-        self.has_class = True
-        return True
-    
-    def get_class(self) -> int:
-        return self.label_class
-    
     def get_num(self) -> int:
         return self.num_points
     
@@ -44,12 +31,12 @@ class OneLabel:
         return len(self.label_points)
     
     def success(self) -> bool:
-        return self.has_class and self.has_points
+        """检查标签是否完成（7个点都已设置）"""
+        return self.has_points and len(self.label_points) == 7
     
     def reset(self):
         """重置标签"""
         self.label_points.clear()
-        self.has_class = False
         self.has_points = False
     
     def empty(self) -> bool:
@@ -63,6 +50,18 @@ class OneLabel:
         if len(self.label_points) < self.num_points:
             self.has_points = False
         return True
+    
+    def get_hexagon_points(self) -> List[QPointF]:
+        """获取六边形的6个点"""
+        if len(self.label_points) >= 6:
+            return self.label_points[:6]
+        return self.label_points
+    
+    def get_free_point(self) -> Optional[QPointF]:
+        """获取游离点（第7个点）"""
+        if len(self.label_points) >= 7:
+            return self.label_points[6]
+        return None
     
     def __getitem__(self, index: int) -> QPointF:
         return self.label_points[index]

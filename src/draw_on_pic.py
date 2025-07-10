@@ -1,8 +1,8 @@
 import os
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from PyQt5.QtWidgets import QLabel
 from PyQt5.QtCore import Qt, QPointF, pyqtSignal
-from PyQt5.QtGui import QImage, QPainter, QTransform, QWheelEvent, QMouseEvent
+from PyQt5.QtGui import QImage, QPainter, QTransform, QWheelEvent, QMouseEvent, QPixmap
 from .qt_painter import Painter
 from .txt_manager import AllLabel
 from .label_manager import OneLabel
@@ -11,11 +11,6 @@ from .model import SmartAdd
 # 模式常量
 MOVE = 0
 ADD = 1
-
-# 工作模式常量
-ARMOR = 0
-ENERGY = 1
-NORM = 2
 
 class DrawOnPic(QLabel):
     """图像绘制和标注组件"""
@@ -27,10 +22,10 @@ class DrawOnPic(QLabel):
         
         # 初始化变量
         self.mode = MOVE
-        self.work_mode = NORM
         self.auto_save = False
         self.have_focus = False
         self.focus_label = -1
+        self.enabled = False  # 添加启用状态
         
         # 图像相关
         self.current_file = ""
@@ -45,14 +40,60 @@ class DrawOnPic(QLabel):
         
         # 组件
         self.painter = Painter()
-        self.all_label = AllLabel(4)
+        self.all_label = AllLabel(7)  # 固定为7个点
         self.model = SmartAdd()
         
         # 启用鼠标跟踪
         self.setMouseTracking(True)
+        
+        # 设置样式
+        self.setStyleSheet("""
+            QLabel {
+                background-color: #2b2b2b;
+                border: 2px solid #555555;
+                border-radius: 5px;
+            }
+        """)
+        
+        # 显示提示文本
+        self.show_disabled_message()
+    
+    def set_enabled(self, enabled: bool):
+        """设置启用状态"""
+        self.enabled = enabled
+        if not enabled:
+            self.show_disabled_message()
+        else:
+            self.update()
+    
+    def show_disabled_message(self):
+        """显示禁用消息"""
+        from PyQt5.QtGui import QPainter, QFont
+        from PyQt5.QtCore import Qt
+        
+        # 创建一个空白图像用于显示消息
+        size = self.size()
+        if size.width() > 0 and size.height() > 0:
+            img = QImage(size, QImage.Format_RGB32)
+            img.fill(Qt.darkGray)
+            
+            painter = QPainter(img)
+            painter.setPen(Qt.white)
+            font = QFont("Arial", 16, QFont.Bold)
+            painter.setFont(font)
+            
+            text = "请先选择包含图片的文件夹\n然后开始标注"
+            painter.drawText(img.rect(), Qt.AlignCenter, text)
+            painter.end()
+            
+            # 显示消息图像
+            self.setPixmap(QPixmap.fromImage(img))
     
     def set_current_file(self, file_path: str):
         """设置当前文件"""
+        if not self.enabled:
+            return
+            
         if self.auto_save:
             self.save_as_txt()
         
@@ -88,32 +129,57 @@ class DrawOnPic(QLabel):
         
         scale_x = label_size.width() / img_size.width()
         scale_y = label_size.height() / img_size.height()
-        scale = min(scale_x, scale_y)
+        scale = min(scale_x, scale_y) * 0.9  # 留一些边距
         
+        # 居中显示
         transform = QTransform()
         transform.scale(scale, scale)
+        
+        # 计算居中偏移
+        scaled_width = img_size.width() * scale
+        scaled_height = img_size.height() * scale
+        offset_x = (label_size.width() - scaled_width) / 2
+        offset_y = (label_size.height() - scaled_height) / 2
+        transform.translate(offset_x / scale, offset_y / scale)
+        
         self.img2label = transform
     
     def paintEvent(self, event):
         """绘制事件"""
+        if not self.enabled:
+            return
+            
         if not self.img:
             return
         
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
         painter.setTransform(self.img2label)
         painter.drawImage(0, 0, self.img)
     
     def wheelEvent(self, event: QWheelEvent):
         """滚轮事件 - 缩放"""
+        if not self.enabled:
+            return
+            
         delta = 1.1 if event.angleDelta().y() > 0 else 1/1.1
         
+        # 以鼠标位置为中心缩放
+        mouse_pos = QPointF(event.pos())
+        
         transform = QTransform()
+        transform.translate(mouse_pos.x(), mouse_pos.y())
         transform.scale(delta, delta)
-        self.img2label = self.img2label * transform
+        transform.translate(-mouse_pos.x(), -mouse_pos.y())
+        
+        self.img2label = transform * self.img2label
         self.draw()
     
     def mousePressEvent(self, event: QMouseEvent):
         """鼠标按下事件"""
+        if not self.enabled:
+            return
+            
         if event.button() == Qt.RightButton:
             self.last_pos = event.pos()
         elif event.button() == Qt.LeftButton:
@@ -128,6 +194,9 @@ class DrawOnPic(QLabel):
     
     def mouseMoveEvent(self, event: QMouseEvent):
         """鼠标移动事件"""
+        if not self.enabled:
+            return
+            
         if event.buttons() & Qt.RightButton:
             # 拖拽图像
             delta = QPointF(event.pos()) - self.last_pos
@@ -149,6 +218,9 @@ class DrawOnPic(QLabel):
     
     def mouseReleaseEvent(self, event: QMouseEvent):
         """鼠标释放事件"""
+        if not self.enabled:
+            return
+            
         if event.button() == Qt.LeftButton and self.mode == ADD:
             self.add_point(event)
         
@@ -157,6 +229,9 @@ class DrawOnPic(QLabel):
     
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         """双击事件 - 删除"""
+        if not self.enabled:
+            return
+            
         if event.button() == Qt.RightButton:
             if self.have_focus:
                 self.all_label.erase_focus(self.focus_label)
@@ -168,13 +243,14 @@ class DrawOnPic(QLabel):
     
     def add_point(self, event: QMouseEvent):
         """添加点"""
-        if self.all_label.label_now.size() == self.all_label.get_num():
+        if self.all_label.label_now.size() == 7:
             self.all_label.label_now.reset()
         
         true_point = self.img2label.inverted()[0].map(QPointF(event.pos()))
         self.all_label.set_point(true_point)
         
-        if self.all_label.label_now.size() == self.all_label.label_now.get_num():
+        if self.all_label.label_now.size() == 7:
+            self.all_label.complete_current_label()
             self.set_move_mode()
         
         self.draw()
@@ -184,7 +260,7 @@ class DrawOnPic(QLabel):
         if not self.all_label.labels_in_pic:
             return None
         
-        max_dist = 10
+        max_dist = 15  # 增大选择范围
         closest_point = None
         
         for label in self.all_label.labels_in_pic:
@@ -209,15 +285,6 @@ class DrawOnPic(QLabel):
         self.painter.draw(self.all_label)
         self.update()
     
-    def set_apex_num(self, text: str):
-        """设置顶点数量"""
-        try:
-            num = int(text)
-            self.all_label = AllLabel(num)
-            self.model.set_num_points(num)
-        except ValueError:
-            pass
-    
     def set_add_mode(self):
         """设置添加模式"""
         if not self.img:
@@ -233,17 +300,6 @@ class DrawOnPic(QLabel):
         self.mode = MOVE
         self.draw()
     
-    def set_class(self, cls_name: str):
-        """设置类别"""
-        if not self.all_label.set_class(cls_name):
-            print("Error setting class")
-        self.draw()
-    
-    def set_focus_class(self, index: int, cls_name: str):
-        """设置焦点标签的类别"""
-        self.all_label.set_focus_class(index, cls_name)
-        self.draw()
-    
     def draw_focus(self, index: int):
         """绘制焦点标签"""
         self.draw()
@@ -254,14 +310,9 @@ class DrawOnPic(QLabel):
             self.painter.draw_focus(focus_label)
             self.update()
     
-    def set_label_path(self, file_path: str, folder_path: str):
+    def set_label_path(self, folder_path: str):
         """设置标签路径"""
-        self.all_label.set_label_path(file_path, folder_path)
-        self.model.set_num_class(self.all_label.get_all_class_num())
-    
-    def get_all_classes(self) -> List[Tuple[int, str]]:
-        """获取所有类别"""
-        return self.all_label.get_all_classes()
+        self.all_label.set_label_path(folder_path)
     
     def get_labels_now(self) -> List[OneLabel]:
         """获取当前标签"""
@@ -277,30 +328,25 @@ class DrawOnPic(QLabel):
     
     def set_model_file(self, model_path: str):
         """设置模型文件"""
-        if self.work_mode in [ARMOR, ENERGY]:
-            self.model.set_model(model_path)
-        else:
-            print("Error: wrong mode for model")
-    
-    def set_work_mode(self, mode: int):
-        """设置工作模式"""
-        self.work_mode = mode
-        
-        if mode == ARMOR:
-            self.model.set_num_class(16)
-            self.model.set_num_points(4)
-            self.all_label = AllLabel(4)
-        elif mode == ENERGY:
-            self.model.set_num_class(6)
-            self.model.set_num_points(4)
-            self.all_label = AllLabel(4)
+        self.model.set_model(model_path)
     
     def smart_detect(self):
         """智能检测"""
-        if self.work_mode in [ARMOR, ENERGY]:
-            self.all_label.reset()
-            success = self.model.detect(self.current_file, self.all_label.labels_in_pic)
-            if success:
-                self.doubleClicked.emit()
+        self.all_label.reset()
+        success = self.model.detect(self.current_file, self.all_label.labels_in_pic)
+        if success:
+            self.doubleClicked.emit()
+            if self.auto_save:
                 self.save_as_txt()
         self.draw()
+    
+    def get_current_progress(self) -> str:
+        """获取当前进度信息"""
+        current_points = self.all_label.label_now.size()
+        total_points = 7
+        completed_labels = len(self.all_label.labels_in_pic)
+        
+        if current_points > 0:
+            return f"当前标签: {current_points}/{total_points} 点 | 已完成: {completed_labels} 个标签"
+        else:
+            return f"已完成: {completed_labels} 个标签"

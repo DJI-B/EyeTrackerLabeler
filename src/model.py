@@ -4,19 +4,17 @@ from typing import List, Tuple, Optional
 from PyQt5.QtCore import QPointF
 from .label_manager import OneLabel
 
-# 尝试导入OpenVINO，如果失败则使用模拟版本
+# 尝试导入ONNX Runtime，如果失败则使用模拟版本
 try:
-    import openvino as ov
-    OPENVINO_AVAILABLE = True
+    import onnxruntime as ort
+    ONNXRUNTIME_AVAILABLE = True
 except ImportError:
-    OPENVINO_AVAILABLE = False
-    print("Warning: OpenVINO not available. Smart detection will be disabled.")
+    ONNXRUNTIME_AVAILABLE = False
+    print("Warning: ONNX Runtime not available. Smart detection will be disabled.")
 
 class Object:
     """检测对象"""
     def __init__(self):
-        self.label = 0
-        self.color = 0
         self.conf = 0.0
         self.points: List[Tuple[float, float]] = []
         self.rect = (0, 0, 0, 0)  # x, y, w, h
@@ -25,49 +23,56 @@ class SmartAdd:
     """智能标注类"""
     
     def __init__(self):
-        self.num_classes = 9
-        self.num_points = 4
+        self.num_points = 7  # 固定为7个点
         self.model_path = ""
         self.input_width = 640
         self.input_height = 640
         self.conf_thresh = 0.6
         self.nms_thresh = 0.3
         
-        # OpenVINO相关
-        if OPENVINO_AVAILABLE:
-            self.core = ov.Core()
-            self.compiled_model = None
-            self.infer_request = None
+        # ONNX Runtime相关
+        if ONNXRUNTIME_AVAILABLE:
+            self.session = None
+            self.input_name = None
+            self.output_names = None
         else:
-            self.core = None
-    
-    def set_num_class(self, num: int):
-        """设置类别数量"""
-        self.num_classes = num // 2  # 除以颜色数
+            self.session = None
     
     def set_num_points(self, points: int):
-        """设置点数"""
-        self.num_points = points
+        """设置点数（固定为7，此方法保持兼容性）"""
+        self.num_points = 7  # 始终为7个点
     
     def set_model(self, model_path: str) -> bool:
         """设置模型路径"""
-        if not OPENVINO_AVAILABLE:
-            print("OpenVINO not available")
+        if not ONNXRUNTIME_AVAILABLE:
+            print("ONNX Runtime not available")
             return False
         
         try:
             self.model_path = model_path
-            model = self.core.read_model(self.model_path)
-            self.compiled_model = self.core.compile_model(model, "CPU")
-            self.infer_request = self.compiled_model.create_infer_request()
+            
+            # 创建ONNX Runtime会话
+            providers = ['CPUExecutionProvider']
+            if ort.get_device() == 'GPU':
+                providers.insert(0, 'CUDAExecutionProvider')
+            
+            self.session = ort.InferenceSession(self.model_path, providers=providers)
+            
+            # 获取输入输出信息
+            self.input_name = self.session.get_inputs()[0].name
+            self.output_names = [output.name for output in self.session.get_outputs()]
             
             # 获取输入形状
-            input_layer = self.compiled_model.input(0)
-            input_shape = input_layer.shape
+            input_shape = self.session.get_inputs()[0].shape
             if len(input_shape) == 4:  # NCHW或NHWC
-                self.input_height = input_shape[2]
-                self.input_width = input_shape[3]
+                if input_shape[1] == 3:  # NCHW
+                    self.input_height = input_shape[2]
+                    self.input_width = input_shape[3]
+                else:  # NHWC
+                    self.input_height = input_shape[1]
+                    self.input_width = input_shape[2]
             
+            print(f"Model loaded successfully. Input shape: {input_shape}")
             return True
         except Exception as e:
             print(f"Error loading model: {e}")
@@ -93,15 +98,19 @@ class SmartAdd:
         """后处理输出"""
         objects = []
         
-        # 这里需要根据具体的模型输出格式来实现
-        # 以下是示例实现，需要根据实际模型调整
+        # 根据ONNX模型输出格式调整
+        if isinstance(output, list):
+            output = output[0]
         
         if output.ndim == 3:
             output = output[0]  # 移除batch维度
         
-        # 假设输出格式为 [num_detections, class + conf + points]
+        # 假设输出格式为 [num_detections, conf + 7*2_points]
+        # 即每个检测包含：置信度 + 7个点的x,y坐标
+        expected_size = 1 + self.num_points * 2  # 1个置信度 + 7个点的坐标
+        
         for detection in output:
-            if len(detection) < self.num_points * 2 + 2:  # 至少需要置信度 + 类别 + 点坐标
+            if len(detection) < expected_size:
                 continue
             
             conf = detection[0]
@@ -110,16 +119,18 @@ class SmartAdd:
             
             obj = Object()
             obj.conf = conf
-            obj.label = int(detection[1]) if len(detection) > 1 else 0
             
             # 提取点坐标
             scale_x = original_shape[1] / self.input_width
             scale_y = original_shape[0] / self.input_height
             
             for i in range(self.num_points):
-                if 2 + i * 2 + 1 < len(detection):
-                    x = detection[2 + i * 2] * scale_x
-                    y = detection[2 + i * 2 + 1] * scale_y
+                x_idx = 1 + i * 2
+                y_idx = 1 + i * 2 + 1
+                
+                if y_idx < len(detection):
+                    x = detection[x_idx] * scale_x
+                    y = detection[y_idx] * scale_y
                     obj.points.append((x, y))
             
             if len(obj.points) == self.num_points:
@@ -127,10 +138,47 @@ class SmartAdd:
         
         return objects
     
+    def non_max_suppression(self, objects: List[Object]) -> List[Object]:
+        """非极大值抑制"""
+        if not objects:
+            return objects
+        
+        # 简单的NMS实现
+        objects.sort(key=lambda x: x.conf, reverse=True)
+        
+        keep = []
+        for i, obj in enumerate(objects):
+            should_keep = True
+            for kept_obj in keep:
+                # 计算IoU或距离，这里简化处理
+                if self.calculate_overlap(obj, kept_obj) > self.nms_thresh:
+                    should_keep = False
+                    break
+            
+            if should_keep:
+                keep.append(obj)
+        
+        return keep
+    
+    def calculate_overlap(self, obj1: Object, obj2: Object) -> float:
+        """计算两个对象的重叠度"""
+        if not obj1.points or not obj2.points:
+            return 0.0
+        
+        # 简化计算：计算第一个点的距离
+        p1 = obj1.points[0]
+        p2 = obj2.points[0]
+        
+        distance = ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)**0.5
+        
+        # 归一化距离作为重叠度
+        max_distance = 100  # 阈值
+        return max(0, 1 - distance / max_distance)
+    
     def detect(self, img_path: str, target: List[OneLabel]) -> bool:
         """检测函数"""
-        if not OPENVINO_AVAILABLE or not self.compiled_model:
-            print("Model not loaded or OpenVINO not available")
+        if not ONNXRUNTIME_AVAILABLE or not self.session:
+            print("Model not loaded or ONNX Runtime not available")
             return False
         
         try:
@@ -146,23 +194,21 @@ class SmartAdd:
             input_data = self.preprocess_image(img)
             
             # 推理
-            self.infer_request.set_input_tensor(input_data)
-            self.infer_request.infer()
-            
-            # 获取输出
-            output = self.infer_request.get_output_tensor().data
+            outputs = self.session.run(self.output_names, {self.input_name: input_data})
             
             # 后处理
-            objects = self.postprocess(output, original_shape)
+            objects = self.postprocess(outputs, original_shape)
+            
+            # NMS
+            objects = self.non_max_suppression(objects)
             
             # 转换为OneLabel格式
             target.clear()
             for obj in objects:
                 if obj.conf >= 0.5:  # 最终置信度阈值
-                    label = OneLabel(0)  # 灵活点数
+                    label = OneLabel(self.num_points)
                     for point in obj.points:
-                        label.set_point_flexible(QPointF(point[0], point[1]))
-                    label.set_class(obj.label)
+                        label.set_point(QPointF(point[0], point[1]))
                     target.append(label)
             
             return True
